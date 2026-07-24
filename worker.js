@@ -2,16 +2,12 @@ addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request))
 })
 
-// 在 Worker 全局作用域记录媒体组 ID，拦截 Telegram 相册重复推送
-const seenMediaGroups = new Set()
-
 async function handleRequest(request) {
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 })
   }
 
   if (typeof TOKEN === 'undefined' || !TOKEN) {
-    console.error('❌ 未读取到 TOKEN，请检查 CF 后台环境变量设置')
     return new Response('TOKEN is missing', { status: 500 })
   }
 
@@ -20,60 +16,65 @@ async function handleRequest(request) {
     const msg = update.message || update.channel_post
     if (!msg) return new Response('OK')
 
-    // 场景 1：回复（Reply）Bot 刚才发出的视频，并发送纯文本 -> 修改其简介
+    // 场景 1：长按回复 Bot 的消息，并发送纯文本 -> 修改其简介/文案
     if (msg.reply_to_message && msg.text && !msg.video && !msg.photo && !msg.animation && !msg.document) {
-      const targetMessageId = msg.reply_to_message.message_id
-      
-      const res = await fetch(`https://api.telegram.org/bot${TOKEN}/editMessageCaption`, {
+      await fetch(`https://api.telegram.org/bot${TOKEN}/editMessageCaption`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: msg.chat.id,
-          message_id: targetMessageId,
+          message_id: msg.reply_to_message.message_id,
           caption: msg.text
         })
       })
-
-      const resData = await res.json()
-      if (!resData.ok) {
-        console.error('修改文案失败:', JSON.stringify(resData))
-      }
       return new Response('OK')
     }
 
-    // 场景 2：原样无痕转发媒体（彻底去除来源，保留原本格式与文案）
+    // 场景 2：原样无痕转发媒体（带防并发和自动重试）
     const hasMedia = msg.video || msg.video_note || msg.photo || msg.animation || msg.document
 
     if (hasMedia) {
-      // 【关键修复】：拦截媒体组/相册的重复推送，防止“回三条消息”
-      if (msg.media_group_id) {
-        if (seenMediaGroups.has(msg.media_group_id)) {
-          // 已经处理过该组视频，直接丢弃后续的多余推送
-          return new Response('OK')
-        }
-        // 没处理过，记录下来
-        seenMediaGroups.add(msg.media_group_id)
-        
-        // 简单清理，防止长时间运行导致内存堆积
-        if (seenMediaGroups.size > 50) {
-          seenMediaGroups.delete(seenMediaGroups.values().next().value)
-        }
+      const payload = {
+        chat_id: msg.chat.id,
+        from_chat_id: msg.chat.id,
+        message_id: msg.message_id
       }
 
-      // 使用 copyMessage 原样复制，只要不写 caption 参数，它就会 100% 继承原消息的文案
-      const res = await fetch(`https://api.telegram.org/bot${TOKEN}/copyMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: msg.chat.id,
-          from_chat_id: msg.chat.id,
-          message_id: msg.message_id
-        })
-      })
+      let retryCount = 0
+      let success = false
 
-      const resData = await res.json()
-      if (!resData.ok) {
-        console.error('Telegram API 返回错误:', JSON.stringify(resData))
+      // 最多尝试 3 次，防止 Telegram 并发限制导致的丢资源
+      while (retryCount < 3 && !success) {
+        // 如果是重试，随机延迟 0.5 ~ 1.5 秒错开高峰
+        if (retryCount > 0) {
+          await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000))
+        }
+
+        const res = await fetch(`https://api.telegram.org/bot${TOKEN}/copyMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        })
+
+        const resData = await res.json()
+
+        if (resData.ok) {
+          success = true
+        } else if (resData.error_code === 429) {
+          // 429 说明请求太快被 Telegram 拦截，准备下一轮重试
+          retryCount++
+        } else {
+          // 遇到其他硬性报错（比如版权保护），直接通过 Bot 发送文字通知你
+          await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: msg.chat.id,
+              text: `❌ 某条媒体转发失败！\n原因: ${resData.description}`
+            })
+          })
+          break
+        }
       }
     }
   } catch (err) {
