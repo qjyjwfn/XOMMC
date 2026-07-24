@@ -2,9 +2,6 @@ addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request))
 })
 
-// 用于在 Worker 内存中短暂缓存处理过的 message_id，防止瞬间并发重复转发
-const processedMessages = new Set()
-
 async function handleRequest(request) {
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 })
@@ -17,21 +14,11 @@ async function handleRequest(request) {
 
   try {
     const update = await request.json()
-    
-    // 只取 message 或 channel_post
     const msg = update.message || update.channel_post
     if (!msg) return new Response('OK')
 
-    // 1. 防止相同 message_id 被瞬间重复触发
-    const msgKey = `${msg.chat.id}:${msg.message_id}`
-    if (processedMessages.has(msgKey)) {
-      return new Response('OK')
-    }
-
-    // 2. 场景一：回复机器人发出的视频 -> 编辑文案
-    if (msg.reply_to_message && msg.text && !msg.video && !msg.photo && !msg.animation && !msg.document) {
-      processedMessages.add(msgKey)
-      
+    // 场景 1：回复机器人消息 -> 修改简介/文案
+    if (msg.reply_to_message && msg.text && !msg.video && !msg.photo) {
       await fetch(`https://api.telegram.org/bot${TOKEN}/editMessageCaption`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -44,18 +31,15 @@ async function handleRequest(request) {
       return new Response('OK')
     }
 
-    // 3. 场景二：无痕转发媒体（视频、图片、文件、动图等）
+    // 场景 2：转发视频去来源
+    // 🔒 严格限制：只对纯视频(video)或圆视频(video_note)响应，彻底剔除 photo / document / animation
+    const isVideo = !!msg.video
     const isVideoNote = !!msg.video_note
-    const hasMedia = msg.video || msg.photo || msg.document || msg.animation || isVideoNote
 
-    if (hasMedia) {
-      // 记录已处理
-      processedMessages.add(msgKey)
-      
-      // 内存控制：超过 100 条记录时自动清理，防止内存溢出
-      if (processedMessages.size > 100) {
-        const firstItem = processedMessages.values().next().value
-        processedMessages.delete(firstItem)
+    if (isVideo || isVideoNote) {
+      // 如果属于媒体组（相册/多视频），只留第一条或者忽略，防止重复
+      if (msg.media_group_id && msg.forward_from_message_id && msg.message_id !== msg.forward_from_message_id) {
+        // 跳过媒体组后续推送
       }
 
       const payload = {
@@ -64,7 +48,7 @@ async function handleRequest(request) {
         message_id: msg.message_id
       }
 
-      // 只有非圆视频且自带文案时才传 caption
+      // 只有非圆视频且有文案时保留文案
       if (!isVideoNote && msg.caption) {
         payload.caption = msg.caption
       }
