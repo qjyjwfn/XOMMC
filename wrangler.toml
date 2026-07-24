@@ -1,3 +1,12 @@
 name = "xommc"
-main = "worker.js"
-compatibility_date = "2024-01-01"
+main = "worke.js"
+compatibility_date = "2026-07-24"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "video_bot"
+database_id = ""d1_databases": [{
+    "binding": "DB",
+    "database_name": "video_bot",
+    "database_id": "021a63b7-86bd-4cda-99a6-ef41628e070f"
+ }]"
