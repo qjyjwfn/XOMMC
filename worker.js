@@ -1,5 +1,6 @@
 export default {
   async fetch(request, env, ctx) {
+
     if (request.method !== 'POST') {
       return new Response('Method Not Allowed', { status: 405 })
     }
@@ -8,13 +9,19 @@ export default {
       return new Response('Configuration missing', { status: 500 })
     }
 
+
     try {
+
       const update = await request.json()
+
       const msg = update.message || update.channel_post
-      if (!msg) return new Response('OK')
+
+      if (!msg) {
+        return new Response('OK')
+      }
 
 
-      // 初始化相册队列
+      // 初始化队列
       await env.DB.prepare(`
         CREATE TABLE IF NOT EXISTS album_queue (
           group_id TEXT,
@@ -23,6 +30,7 @@ export default {
           raw_data TEXT
         )
       `).run()
+
 
       await env.DB.prepare(`
         CREATE TABLE IF NOT EXISTS album_lock (
@@ -45,7 +53,7 @@ export default {
         await fetch(
           `https://api.telegram.org/bot${env.TOKEN}/editMessageCaption`,
           {
-            method: 'POST',
+            method:'POST',
             headers:{
               'Content-Type':'application/json'
             },
@@ -62,22 +70,40 @@ export default {
 
 
 
-      // 多媒体组
+
+      // 媒体组
       if (msg.media_group_id) {
+
 
         const groupId = msg.media_group_id
         const chatId = msg.chat.id
 
 
-        // 原频道ID
-        const fromChatId =
-          msg.forward_from_chat?.id ||
-          msg.forward_origin?.chat?.id
+        // 获取原频道ID
+        let fromChatId = null
+
+
+        if (msg.forward_from_chat) {
+
+          fromChatId = msg.forward_from_chat.id
+
+        }
+        else if (msg.forward_origin?.chat) {
+
+          fromChatId = msg.forward_origin.chat.id
+
+        }
+
 
 
         await env.DB.prepare(`
           INSERT INTO album_queue
-          (group_id,message_id,from_chat_id,raw_data)
+          (
+            group_id,
+            message_id,
+            from_chat_id,
+            raw_data
+          )
           VALUES (?,?,?,?)
         `)
         .bind(
@@ -91,7 +117,7 @@ export default {
 
 
         // 抢锁
-        const lockRes =
+        const lock =
           await env.DB.prepare(`
             INSERT OR IGNORE INTO album_lock(group_id)
             VALUES(?)
@@ -100,31 +126,38 @@ export default {
           .run()
 
 
+
         if (
-          lockRes.meta &&
-          lockRes.meta.changes === 0
+          lock.meta &&
+          lock.meta.changes === 0
         ) {
+
           return new Response('OK')
+
         }
 
 
 
-        // 等待媒体组完整
+        // 等待同组消息
         await new Promise(
-          resolve=>setTimeout(resolve,1500)
+          r => setTimeout(r,1500)
         )
 
 
 
-        const {results:rows} =
-          await env.DB.prepare(`
-            SELECT message_id,from_chat_id
-            FROM album_queue
-            WHERE group_id=?
-            ORDER BY message_id ASC
-          `)
-          .bind(groupId)
-          .all()
+        const {
+          results:rows
+        } =
+        await env.DB.prepare(`
+          SELECT 
+          message_id,
+          from_chat_id
+          FROM album_queue
+          WHERE group_id=?
+          ORDER BY message_id ASC
+        `)
+        .bind(groupId)
+        .all()
 
 
 
@@ -145,7 +178,7 @@ export default {
 
 
 
-        if (!rows || rows.length===0) {
+        if (!rows.length) {
           return new Response('OK')
         }
 
@@ -155,8 +188,29 @@ export default {
           rows[0].from_chat_id
 
 
-        if (sourceChat) {
 
+        console.log(
+          '来源频道:',
+          sourceChat,
+          '消息:',
+          rows.map(r=>r.message_id)
+        )
+
+
+
+        if (!sourceChat) {
+
+          console.log(
+            '没有获取到来源频道'
+          )
+
+          return new Response('OK')
+
+        }
+
+
+
+        const tgRes =
           await fetch(
             `https://api.telegram.org/bot${env.TOKEN}/forwardMessages`,
             {
@@ -165,20 +219,37 @@ export default {
                 'Content-Type':'application/json'
               },
               body:JSON.stringify({
+
                 chat_id:chatId,
+
                 from_chat_id:sourceChat,
+
                 message_ids:
                   rows.map(
                     r=>r.message_id
                   )
+
               })
             }
           )
 
-        }
+
+        const tgText =
+          await tgRes.text()
+
+
+        console.log(
+          'forwardMessages:',
+          tgText
+        )
+
+
 
         return new Response('OK')
+
       }
+
+
 
 
 
@@ -191,7 +262,9 @@ export default {
         msg.document
 
 
+
       if (hasMedia) {
+
 
         await fetch(
           `https://api.telegram.org/bot${env.TOKEN}/copyMessage`,
@@ -201,14 +274,19 @@ export default {
               'Content-Type':'application/json'
             },
             body:JSON.stringify({
+
               chat_id:msg.chat.id,
+
               from_chat_id:msg.chat.id,
+
               message_id:msg.message_id
+
             })
           }
         )
 
       }
+
 
 
     } catch(err) {
@@ -219,6 +297,7 @@ export default {
       )
 
     }
+
 
 
     return new Response('OK')
