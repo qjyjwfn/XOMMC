@@ -11,8 +11,8 @@ async function handleRequest(request) {
     return new Response('TOKEN is missing', { status: 500 })
   }
 
-  if (typeof KV === 'undefined') {
-    return new Response('KV binding is missing, please bind KV as "KV"', { status: 500 })
+  if (typeof DB === 'undefined') {
+    return new Response('DB binding is missing, please bind D1 as "DB"', { status: 500 })
   }
 
   try {
@@ -34,41 +34,42 @@ async function handleRequest(request) {
       return new Response('OK')
     }
 
-    // 场景 2：处理多媒体相册（带有 media_group_id，如海报 + 视频组合）
+    // 场景 2：处理多媒体相册（海报 + 视频组合）
     if (msg.media_group_id) {
       const groupId = msg.media_group_id
-      const key = `mg_${groupId}_${msg.message_id}`
-      
-      // 将当前消息存入 KV，有效期 60 秒
-      await KV.put(key, JSON.stringify(msg), { expirationTtl: 60 })
+      const now = Date.now()
 
-      // 等待 1.5 秒，让并发进来的其他海报和视频陆续写入 KV
+      // 将当前消息存入 D1 数据库
+      await DB.prepare('INSERT INTO media_queue (group_id, data, created_at) VALUES (?, ?, ?)')
+        .bind(groupId, JSON.stringify(msg), now)
+        .run()
+
+      // 等待 1.5 秒，让并发进来的其他海报和视频全部写入数据库
       await new Promise(resolve => setTimeout(resolve, 1500))
 
-      // 加锁：确保多个并发请求中只有第一个执行打包发送，防止重复刷屏
-      const lockKey = `lock_${groupId}`
-      const locked = await KV.get(lockKey)
-      if (locked) {
+      // 加锁机制：查询当前组最早的一条记录，只有当“我是第一条”时才由我负责打包发送
+      const firstItem = await DB.prepare('SELECT created_at FROM media_queue WHERE group_id = ? ORDER BY created_at ASC LIMIT 1')
+        .bind(groupId)
+        .first()
+
+      if (!firstItem || firstItem.created_at !== now) {
+        // 说明不是第一条触发的实例，直接静默退出，交给主实例打包
         return new Response('OK')
       }
-      await KV.put(lockKey, '1', { expirationTtl: 60 })
 
-      // 读取该组所有消息
-      const list = await KV.list({ prefix: `mg_${groupId}_` })
-      const messages = []
-      for (const k of list.keys) {
-        const val = await KV.get(k.name)
-        if (val) {
-          messages.push(JSON.parse(val))
-        }
-      }
+      // 获取该相册组的所有媒体数据
+      const { results: rows } = await DB.prepare('SELECT data FROM media_queue WHERE group_id = ?')
+        .bind(groupId)
+        .all()
 
-      if (messages.length === 0) return new Response('OK')
+      // 清理数据库中的该组缓存
+      await DB.prepare('DELETE FROM media_queue WHERE group_id = ?').bind(groupId).run()
 
-      // 按原消息 ID 排序，保证海报在前、视频在后
+      if (!rows || rows.length === 0) return new Response('OK')
+
+      const messages = rows.map(r => JSON.parse(r.data))
       messages.sort((a, b) => a.message_id - b.message_id)
 
-      // 组装 sendMediaGroup 所需的媒体数组
       const mediaArray = []
       let globalCaption = ''
 
@@ -97,7 +98,6 @@ async function handleRequest(request) {
 
         if (fileId) {
           const mediaItem = { type, media: fileId }
-          // 将文案完整挂载在相册的第一项上
           if (i === 0 && globalCaption) {
             mediaItem.caption = globalCaption
           }
@@ -119,7 +119,7 @@ async function handleRequest(request) {
       return new Response('OK')
     }
 
-    // 场景 3：单条媒体消息（如单独的视频或图片，无相册分组）
+    // 场景 3：单条媒体消息（无相册分组）
     const hasMedia = msg.video || msg.video_note || msg.photo || msg.animation || msg.document
     if (hasMedia) {
       await fetch(`https://api.telegram.org/bot${TOKEN}/copyMessage`, {
