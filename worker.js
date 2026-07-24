@@ -17,8 +17,8 @@ async function handleRequest(request) {
     const msg = update.message || update.channel_post
     if (!msg) return new Response('OK')
 
-    // 场景 1：回复机器人消息 -> 修改简介/文案
-    if (msg.reply_to_message && msg.text && !msg.video && !msg.photo) {
+    // 场景 1：回复 Bot 发出的视频消息 -> 修改其简介/文案
+    if (msg.reply_to_message && msg.text && !msg.video && !msg.photo && !msg.animation && !msg.document) {
       await fetch(`https://api.telegram.org/bot${TOKEN}/editMessageCaption`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -31,32 +31,23 @@ async function handleRequest(request) {
       return new Response('OK')
     }
 
-    // 场景 2：转发视频去来源
-    // 🔒 严格限制：只对纯视频(video)或圆视频(video_note)响应，彻底剔除 photo / document / animation
-    const isVideo = !!msg.video
-    const isVideoNote = !!msg.video_note
+    // 场景 2：原样无痕复制消息（抹去来源，原封不动保留原文案与格式）
+    const hasMedia = msg.video || msg.video_note || msg.photo || msg.animation || msg.document
 
-    if (isVideo || isVideoNote) {
-      // 如果属于媒体组（相册/多视频），只留第一条或者忽略，防止重复
-      if (msg.media_group_id && msg.forward_from_message_id && msg.message_id !== msg.forward_from_message_id) {
-        // 跳过媒体组后续推送
-      }
-
-      const payload = {
-        chat_id: msg.chat.id,
-        from_chat_id: msg.chat.id,
-        message_id: msg.message_id
-      }
-
-      // 只有非圆视频且有文案时保留文案
-      if (!isVideoNote && msg.caption) {
-        payload.caption = msg.caption
+    if (hasMedia) {
+      // 过滤媒体组重复请求
+      if (msg.media_group_id && update.update_id % 2 !== 0) {
+        return new Response('OK')
       }
 
       const res = await fetch(`https://api.telegram.org/bot${TOKEN}/copyMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          chat_id: msg.chat.id,
+          from_chat_id: msg.chat.id,
+          message_id: msg.message_id
+        })
       })
 
       const resData = await res.json()
