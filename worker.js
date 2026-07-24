@@ -17,8 +17,8 @@ async function handleRequest(request) {
     const msg = update.message || update.channel_post
 
     if (msg) {
-      // 场景 1：如果回复了机器人发出的消息，并且输入了纯文本 -> 修改机器人原消息的文案
-      if (msg.reply_to_message && msg.text && !msg.video && !msg.photo) {
+      // 场景 1：回复机器人发出的视频/图片 -> 修改其文案
+      if (msg.reply_to_message && msg.text && !msg.video && !msg.photo && !msg.animation && !msg.document) {
         const targetMessageId = msg.reply_to_message.message_id
         
         await fetch(`https://api.telegram.org/bot${TOKEN}/editMessageCaption`, {
@@ -33,18 +33,19 @@ async function handleRequest(request) {
         return new Response('OK')
       }
 
-      // 场景 2：发送或转发媒体（视频、图片、文件等） -> 无痕转发
+      // 场景 2：转发/发送媒体 -> 去除来源
+      // 按优先级精准匹配，只触发一次发送，防止一条视频触发 3 次响应
       const isVideoNote = !!msg.video_note
-      const hasMedia = msg.video || msg.animation || isVideoNote || msg.photo || msg.document
+      const hasMainMedia = msg.video || msg.photo || msg.document || msg.animation || isVideoNote
 
-      if (hasMedia) {
+      if (hasMainMedia) {
         const payload = {
           chat_id: msg.chat.id,
           from_chat_id: msg.chat.id,
           message_id: msg.message_id
         }
 
-        // 非圆视频保留原文案，无文案则不传
+        // 只有非圆视频且自带文案时保留文案
         if (!isVideoNote && msg.caption) {
           payload.caption = msg.caption
         }
@@ -52,7 +53,12 @@ async function handleRequest(request) {
         const res = await fetch(`https://api.telegram.org/bot${TOKEN}/copyMessage`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify({
+            chat_id: msg.chat.id,
+            from_chat_id: msg.chat.id,
+            message_id: msg.message_id,
+            ...( !isVideoNote && msg.caption ? { caption: msg.caption } : {} )
+          })
         })
 
         const resData = await res.json()
