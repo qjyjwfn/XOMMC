@@ -21,13 +21,11 @@ export default {
       }
 
 
-      // 初始化队列
+      // 初始化
       await env.DB.prepare(`
         CREATE TABLE IF NOT EXISTS album_queue (
           group_id TEXT,
-          message_id INTEGER,
-          from_chat_id TEXT,
-          raw_data TEXT
+          message_id INTEGER
         )
       `).run()
 
@@ -40,7 +38,7 @@ export default {
 
 
 
-      // 回复 Bot 消息修改简介
+      // 回复修改简介
       if (
         msg.reply_to_message &&
         msg.text &&
@@ -74,49 +72,22 @@ export default {
       // 媒体组
       if (msg.media_group_id) {
 
-
         const groupId = msg.media_group_id
-        const chatId = msg.chat.id
-
-
-        // 获取原频道ID
-        let fromChatId = null
-
-
-        if (msg.forward_from_chat) {
-
-          fromChatId = msg.forward_from_chat.id
-
-        }
-        else if (msg.forward_origin?.chat) {
-
-          fromChatId = msg.forward_origin.chat.id
-
-        }
-
 
 
         await env.DB.prepare(`
           INSERT INTO album_queue
-          (
-            group_id,
-            message_id,
-            from_chat_id,
-            raw_data
-          )
-          VALUES (?,?,?,?)
+          (group_id,message_id)
+          VALUES (?,?)
         `)
         .bind(
           groupId,
-          msg.message_id,
-          fromChatId,
-          JSON.stringify(msg)
+          msg.message_id
         )
         .run()
 
 
 
-        // 抢锁
         const lock =
           await env.DB.prepare(`
             INSERT OR IGNORE INTO album_lock(group_id)
@@ -127,20 +98,19 @@ export default {
 
 
 
+        // 已经有其它请求处理
         if (
           lock.meta &&
           lock.meta.changes === 0
         ) {
-
           return new Response('OK')
-
         }
 
 
 
-        // 等待同组消息
+        // 等待album完整
         await new Promise(
-          r => setTimeout(r,1500)
+          r=>setTimeout(r,3000)
         )
 
 
@@ -149,9 +119,7 @@ export default {
           results:rows
         } =
         await env.DB.prepare(`
-          SELECT 
-          message_id,
-          from_chat_id
+          SELECT message_id
           FROM album_queue
           WHERE group_id=?
           ORDER BY message_id ASC
@@ -184,71 +152,45 @@ export default {
 
 
 
-        const sourceChat =
-          rows[0].from_chat_id
-
-
-
         console.log(
-          '来源频道:',
-          sourceChat,
-          '消息:',
+          '复制消息:',
           rows.map(r=>r.message_id)
         )
 
 
 
-        if (!sourceChat) {
+        const result =
+        await fetch(
+          `https://api.telegram.org/bot${env.TOKEN}/copyMessages`,
+          {
+            method:'POST',
+            headers:{
+              'Content-Type':'application/json'
+            },
+            body:JSON.stringify({
 
-          console.log(
-            '没有获取到来源频道'
-          )
+              chat_id:msg.chat.id,
 
-          return new Response('OK')
+              from_chat_id:msg.chat.id,
 
-        }
+              message_ids:
+                rows.map(
+                  r=>r.message_id
+                )
 
-
-
-        const tgRes =
-          await fetch(
-            `https://api.telegram.org/bot${env.TOKEN}/forwardMessages`,
-            {
-              method:'POST',
-              headers:{
-                'Content-Type':'application/json'
-              },
-              body:JSON.stringify({
-
-                chat_id:chatId,
-
-                from_chat_id:sourceChat,
-
-                message_ids:
-                  rows.map(
-                    r=>r.message_id
-                  )
-
-              })
-            }
-          )
-
-
-        const tgText =
-          await tgRes.text()
-
-
-        console.log(
-          'forwardMessages:',
-          tgText
+            })
+          }
         )
 
 
+        console.log(
+          'copyMessages:',
+          await result.text()
+        )
+
 
         return new Response('OK')
-
       }
-
 
 
 
@@ -260,7 +202,6 @@ export default {
         msg.photo ||
         msg.animation ||
         msg.document
-
 
 
       if (hasMedia) {
@@ -288,7 +229,6 @@ export default {
       }
 
 
-
     } catch(err) {
 
       console.error(
@@ -297,7 +237,6 @@ export default {
       )
 
     }
-
 
 
     return new Response('OK')
